@@ -1,0 +1,86 @@
+name: Go Images
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+      latest: ${{ steps.versions.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: versions
+        run: |
+          echo "matrix=$(jq -c '[to_entries[] | {minor: .key, version: .value}]' go-versions.json)" >> "$GITHUB_OUTPUT"
+          echo "latest=$(jq -r 'to_entries[0].value' go-versions.json)" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: versions
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg GO_VERSION=${{ matrix.version }} \
+            -t go-test .
+
+      - name: Test runtime
+        run: |
+          docker run --rm go-test
+          docker run --rm --entrypoint go go-test version
+          docker run --rm \
+            -e STARTUP='go version' \
+            go-test
+          docker run --rm --entrypoint id go-test -u
+
+  publish:
+    needs: [versions, test]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            GO_VERSION=${{ matrix.version }}
+          tags: |
+            ghcr.io/akaanakbaik/image-go:go_${{ matrix.minor }}
+            ghcr.io/akaanakbaik/image-go:go_${{ matrix.version }}
+            ${{ matrix.version == needs.versions.outputs.latest && 'ghcr.io/akaanakbaik/image-go:go_latest' || '' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/akaanakbaik/image-go
+            org.opencontainers.image.description=Universal Go image for Pterodactyl
+          provenance: true
+          sbom: true
